@@ -7,6 +7,7 @@
 
 #include "mbed.h"
 #include "platform/mbed_thread.h"
+#include <cstdint>
 
 
 DigitalIn I0(A0); // d bounce count
@@ -16,6 +17,7 @@ DigitalOut SHLD(D2),SERCLK(D3),INHCLK(D4),LATCHER(D5);  // 166x595 7 segment
 BusOut sevseg(D9, D10, D11, D12, D13, D14, D15); // 7 segment out bus
 DigitalOut  crctr(D8),start_ld(D0);            // debugger
 uint8_t cno = 0b0,cnock = 0b0,enbounce = 0;    //input code for check
+uint8_t Sporder = 0, cnx = 2;                  // for stateX
 uint8_t sevdg = 0,sevcode=0b00000000;          // special drive 28_
 uint32_t TStamp =0,DishTime=0;                 // time special drive 28_
 uint32_t timeStampSR =0;                       // clock loop
@@ -23,10 +25,10 @@ void sevenSegmentDriverLoop(uint8_t I8bitIn);  // 595 driver
 void ParraRegisDrive(uint8_t inp);             // 166x595 driver
 void CodeShifter();                            // shift when bounce clock
 void STATUMDetect();                           // Grand State Machine
+void STATUXDetXP();                            // Grand State 6 state ver
 void SegSpecialOrder();                        // 166x595 special drive 28_
 
-int fallingEdgeDetect()
-{
+int fallingEdgeDetect(){
     static uint8_t buttonstate = 0;
     uint8_t Res = -1;//Default Result, mean nothing change
     if (buttonstate == 0) {
@@ -43,7 +45,6 @@ int fallingEdgeDetect()
         } return Res;
 }
 
-
 int main()
 {
 while(true)
@@ -53,7 +54,13 @@ while(true)
         {
             timeStampSR = time;           //set new time stamp
             sevenSegmentDriverLoop(cno);  //call 74hc595 management function
-            STATUMDetect();               // state machine
+            //STATUMDetect();               // state machine
+            STATUXDetXP();                  // state X machine              
+
+            if(Sporder == 1){
+                SegSpecialOrder(); }      // generate special 2 8 _ in savcode
+            
+            ParraRegisDrive(sevcode);   // 166 x 595 Driver
         }
 
         int8_t bounce = fallingEdgeDetect();
@@ -61,13 +68,14 @@ while(true)
         {
             enbounce++;                   // check START state(no bounce before) 
             CodeShifter();
+            
         }
             
-    }   //end while
-}       // end int main
+    } 
+} 
 
-void sevenSegmentDriverLoop(uint8_t I8bitIn)
-{
+// 5 LED code drive
+void sevenSegmentDriverLoop(uint8_t I8bitIn) {
     static enum {INIT,HSRCLK,LSRCLK,HRCLK} SRState = INIT;
     static uint8_t SegPosition =0;
     switch(SRState)
@@ -114,11 +122,10 @@ void sevenSegmentDriverLoop(uint8_t I8bitIn)
     }// end switch
 }// end void
 
-void CodeShifter()
-{
+void CodeShifter(){
     cno = (cno << 1)+ C1; // shift old and add new
     cnock = cno << 3;     // for condition check
-
+    cnx = C1;
 }// end void
 
 void STATUMDetect(){     // Grand STATE MACHINE  for system
@@ -128,8 +135,9 @@ void STATUMDetect(){     // Grand STATE MACHINE  for system
             default:
             start_ld = 1;
             crctr= 0 ;
-            ParraRegisDrive(0b01011011);// 7segment = 0b0101 1011 S,5
-            
+
+            sevcode = 0b01011011; // 7segment = 0b0101 1011 S,5
+            Sporder = 0;
             switch (enbounce){  
                 case not 0:     // bounce not 0 times mean input recieved
                 STATUM = CHECK ; 
@@ -139,18 +147,21 @@ void STATUMDetect(){     // Grand STATE MACHINE  for system
             case CHECK:
             start_ld = 0;
             crctr= 0;
-            ParraRegisDrive(0b01001110); // 7segment = 0b01001110 C
+
+            sevcode = (0b01001110);// 7segment = 0b01001110 C
+            Sporder = 0;
                 switch(cnock){
                     case 0b11100000:     // match with 28(11100 << 3)
                         STATUM = MATCH;
+                        sevdg = 0; // start _ 2 8 at (_,state 0), when start special,dg is plused
                     break;}
             break;
             
             case MATCH:
             start_ld = 0;
             crctr = 1;
-            SegSpecialOrder();        // generate  special 2 8 _ in savcode
-            ParraRegisDrive(sevcode); //
+        
+            Sporder = 1; // enable generate  special 2 8 _ in savcode
             if(cnock != 0b11100000){  // back to start after match
                 cno = 0b0; cnock = 0b0,enbounce = 0;
                 STATUM = START ;
@@ -159,27 +170,151 @@ void STATUMDetect(){     // Grand STATE MACHINE  for system
             } //end switch statum
 }// end void STATUM
 
-void SegSpecialOrder()// 7 segment special 2 8 _ 0b01101101 0b01111111 0b00000000
-{
+void STATUXDetXP(){     // Grand STATEX MACHINE  for system
+    // cnx = 0,1 means bounced, new value come -> change state activate
+    // cnx = 2 means new value hasn't come -> state do but not change / prevent flip flop error
+    static enum {INIT,SA,SB,SC,SE,SCRT} STATUM = INIT;
+    switch (STATUM){
+            case INIT:
+            default:
+            Sporder = 0;
+            crctr = 0;
+            sevcode = 0b00110000; // 7segment = 0b 0011 0000 I
+                switch (cnx){  
+                    case 1:     
+                    STATUM = SA ;
+                    cnx = 2; 
+                    break;
+                    case 0:    
+                    STATUM = INIT ;
+                    cnx = 2; 
+                    break;
+                    case 2:  // Latching
+                        STATUM = INIT;
+                    break;
+            }
+            break;
+            
+            case SA: // 1
+            Sporder = 0;
+            crctr = 0;
+            sevcode = 0b01110111 ;// 7segment = 0b 0111 0111 A
+            switch(cnx){
+                case 0: 
+                    STATUM = INIT;
+                    cnx = 2;
+                break;
+                case 1: 
+                    STATUM = SB;
+                    cnx = 2;
+                break;
+                case 2:  // Latching
+                    STATUM = SA;
+                break;
+            }
+            break;
+            
+            case SB:  // 11
+            Sporder = 0;
+            crctr = 0;
+            sevcode = 0b00011111;// 0b 0001 1111 b
+                switch(cnx){
+                    case 0: 
+                        STATUM = INIT;
+                        cnx = 2;
+                    break;
+                    case 1: 
+                        STATUM = SC;
+                        cnx = 2;
+                    break;
+                    case 2:  // Latching
+                        STATUM = SB;
+                    break;
+                }
+            break;
+
+            case SC:  // 111
+            Sporder = 0;
+            crctr = 0;
+            sevcode = 0b01001110; // 7segment = 0b 0100 1110 C
+                switch(cnx){
+                    case 0: 
+                        STATUM = SE;
+                        cnx = 2;
+                    break;
+                    case 1: 
+                        STATUM = SC;
+                        cnx = 2;
+                    break;
+                    case 2:  // Latching
+                        STATUM = SC;
+                    break;
+                }
+            break;
+
+            case SE:  // 1110
+            Sporder = 0;
+            crctr = 0;
+            sevcode = 0b01001111; // 7segment = 0b 0100 1111 E
+                switch(cnx){
+                    case 0: 
+                        STATUM = SCRT;
+                        sevdg = 0; // start _ 2 8 at (_,state 0)
+                        cnx = 2;
+                    break;
+                    case 1: 
+                        STATUM = SA;
+                        cnx = 2;
+                    break;
+                    case 2:  // Latching
+                        STATUM = SE;
+                    break;
+                }
+            break;
+
+            case SCRT: // 11100       
+            Sporder = 1; // generate  special 2 8 _ in sevcode
+            crctr = 1;
+
+            switch(cnx){
+                case 0: 
+                    cno = 0b0; cnock = 0b0;
+                    STATUM = INIT ;
+                    cnx = 2;
+                break;
+                case 1: 
+                    cno = 0b0; cnock = 0b0;
+                    STATUM = INIT ;
+                    cnx = 2;
+                break;
+                case 2:  // Latching
+                    STATUM = SCRT;
+                break;
+                }
+            break;
+            } //end switch statum
+}// end void STATUMX
+
+void SegSpecialOrder(){// 7 segment special 2 8 _ 0b01101101 0b01111111 0b00000000
     uint32_t timer = us_ticker_read();
     if(timer-DishTime > 1000000) // change output every 1000 msec
         {
-            DishTime =timer;
-            if (sevdg >= 3){
+            DishTime = timer;
+            if (sevdg >= 2){
                 sevdg = 0; }   //reset
             else{ sevdg++; }
         }
-        switch (sevdg){
-            case 0:
-            default: 
-            sevcode = 0b00001000; break; //_ 
-            
-            case 1:
-            sevcode = 0b01101101; break; //2
-            
-            case 2:
-            sevcode = 0b01111111; break; //8
-            }//end switch
+    switch (sevdg){
+        default: 
+        case 0:
+        sevcode = 0b00001000; break; //_ 
+        
+        case 1:
+        sevcode = 0b01101101; break; //2
+        
+        case 2:
+        sevcode = 0b01111111; break; //8
+        }//end switch
     } // end void special segment
     
 void ParraRegisDrive(uint8_t inp){   // sn74hc166x595 drive
